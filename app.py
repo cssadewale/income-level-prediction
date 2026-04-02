@@ -5,16 +5,16 @@ Author  : Adewale Adeagbo
 GitHub  : https://github.com/cssadewale
 LinkedIn: https://linkedin.com/in/adewalesamsonadeagbo
 
-This app loads the trained Random Forest model and scaler, accepts
-user-input census features, and returns a predicted income class
-with a probability score.
+Model files are stored on Google Drive (too large for GitHub).
+They are downloaded automatically when the app starts.
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
 import os
+import gdown
+import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
 
 # ── Page Configuration ────────────────────────────────────────────────────
 st.set_page_config(
@@ -24,31 +24,66 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Load Model and Scaler ─────────────────────────────────────────────────
-@st.cache_resource
-def load_artifacts():
-    """Load the saved model and scaler. Cached so they load only once."""
-    model_path  = os.path.join("models", "income_prediction_rf_model.joblib")
-    scaler_path = os.path.join("models", "income_prediction_scaler.joblib")
+# ── Google Drive File IDs ─────────────────────────────────────────────────
+# Extracted from the shareable Google Drive links.
+# Link format: https://drive.google.com/file/d/FILE_ID/view
+MODEL_FILE_ID  = "1Gu0twEPwLE3qqYFnJ8JfU2YQFi4k1l9B"
+SCALER_FILE_ID = "1__bNEQfDKE2gLbZxs6xfkWFF0gs-Ddhe"
 
-    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+MODEL_PATH  = "income_prediction_rf_model.joblib"
+SCALER_PATH = "income_prediction_scaler.joblib"
+
+
+# ── Download and Load Model Files ─────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_artifacts():
+    """
+    Download model and scaler from Google Drive if not already present,
+    then load and return them.
+
+    @st.cache_resource means this function runs only ONCE per app session.
+    After the first run, the loaded model and scaler are reused for every
+    subsequent user interaction — no repeated downloads or reloads.
+    """
+
+    # Download model file if not already on disk
+    if not os.path.exists(MODEL_PATH):
+        with st.spinner("Downloading model file... (first load only, ~15 seconds)"):
+            gdown.download(
+                f"https://drive.google.com/uc?id={MODEL_FILE_ID}",
+                MODEL_PATH,
+                quiet=False
+            )
+
+    # Download scaler file if not already on disk
+    if not os.path.exists(SCALER_PATH):
+        with st.spinner("Downloading scaler file..."):
+            gdown.download(
+                f"https://drive.google.com/uc?id={SCALER_FILE_ID}",
+                SCALER_PATH,
+                quiet=False
+            )
+
+    # Confirm both files downloaded correctly
+    if not os.path.exists(MODEL_PATH) or not os.path.exists(SCALER_PATH):
         st.error(
-            "⚠️  Model files not found. "
-            "Please run the notebook first to generate "
-            "`income_prediction_rf_model.joblib` and "
-            "`income_prediction_scaler.joblib`, then place them in the `models/` folder."
+            "❌ Model files could not be downloaded from Google Drive. "
+            "Please ensure both files are shared as 'Anyone with the link' "
+            "in Google Drive, then reload this page."
         )
         st.stop()
 
-    model  = joblib.load(model_path)
-    scaler = joblib.load(scaler_path)
+    model  = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
     return model, scaler
+
 
 model, scaler = load_artifacts()
 
-# ── Known Training Columns ────────────────────────────────────────────────
-# These are the exact columns produced by the notebook's one-hot encoding.
-# They must match the columns the model was trained on.
+
+# ── Training Column Schema ─────────────────────────────────────────────────
+# These are the EXACT column names produced by the notebook's one-hot encoding.
+# The input data must be transformed to match this schema before prediction.
 TRAINING_COLUMNS = [
     'age', 'capital_gain', 'capital_loss', 'hours_per_week',
     'has_capital_gain', 'has_capital_loss',
@@ -94,123 +129,108 @@ TRAINING_COLUMNS = [
 
 NUMERICAL_COLS = ['age', 'capital_gain', 'capital_loss', 'hours_per_week']
 
+
 # ── Preprocessing Function ────────────────────────────────────────────────
 def preprocess_input(raw_input: dict) -> pd.DataFrame:
     """
-    Convert raw user input dict into a model-ready DataFrame:
-    1. Build engineered features
-    2. One-hot encode categoricals
-    3. Align columns to training schema (fill missing dummies with 0)
-    4. Apply saved StandardScaler to numerical columns
+    Convert raw user input into a model-ready DataFrame.
+
+    Step 1 — Build a single-row DataFrame from the input dictionary
+    Step 2 — Engineer the two binary capital flag features
+    Step 3 — One-hot encode all categorical columns (drop_first=True,
+              matching the notebook's exact encoding)
+    Step 4 — Add any missing dummy columns as 0 (handles categories
+              the user did not select — they become all-zero columns)
+    Step 5 — Reorder columns to match the training schema exactly
+    Step 6 — Scale the four numerical columns using the saved scaler
     """
     df = pd.DataFrame([raw_input])
 
-    # Engineer binary capital flags
+    # Step 2
     df['has_capital_gain'] = (df['capital_gain'] > 0).astype(int)
     df['has_capital_loss'] = (df['capital_loss'] > 0).astype(int)
 
-    # One-hot encode (same logic as notebook: drop_first=True)
-    cat_cols = ['workclass', 'education', 'marital_status', 'occupation',
-                'relationship', 'race', 'sex', 'native_country']
+    # Step 3
+    cat_cols = [
+        'workclass', 'education', 'marital_status', 'occupation',
+        'relationship', 'race', 'sex', 'native_country'
+    ]
     df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
 
-    # Align to training columns — add any missing dummy columns as 0
+    # Step 4
     for col in TRAINING_COLUMNS:
         if col not in df.columns:
             df[col] = 0
 
-    # Keep only training columns, in the exact training order
+    # Step 5
     df = df[TRAINING_COLUMNS]
 
-    # Scale numerical features using the saved scaler
+    # Step 6
     df[NUMERICAL_COLS] = scaler.transform(df[NUMERICAL_COLS])
 
     return df
 
 
-# ── App Header ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# APP LAYOUT
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Header ────────────────────────────────────────────────────────────────
 st.title("💰 Income Level Predictor")
 st.markdown(
-    "This app predicts whether an individual earns **above or below \\$50,000/year** "
-    "based on U.S. Census features, using a **Tuned Random Forest Classifier** trained on "
-    "48,842 census records."
+    "Predict whether an individual earns **above or below \\$50,000/year** "
+    "based on U.S. Census data. Powered by a **Tuned Random Forest Classifier** "
+    "trained on 48,842 census records."
 )
 st.markdown("---")
 
-# ── Sidebar — About ───────────────────────────────────────────────────────
+
+# ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("ℹ️ About This App")
-    st.markdown(
-        """
-        **Model:** Tuned Random Forest Classifier  
-        **Dataset:** UCI Adult Census Income (1994)  
-        **Features:** 14 (including 2 engineered)  
-        **Primary metric:** ROC-AUC  
+    st.markdown("""
+**Model:** Tuned Random Forest Classifier  
+**Dataset:** UCI Adult Census Income (1994)  
+**Records trained on:** 48,842  
+**Features used:** 14 (including 2 engineered)  
+**Primary metric:** ROC-AUC  
 
-        **Top Predictors:**
-        - Age
-        - Capital Gain
-        - Hours per Week
-        - Marital Status
-        - Education & Occupation
+---
 
-        ---
-        **Author:** Adewale Adeagbo  
-        [GitHub](https://github.com/cssadewale) · 
-        [LinkedIn](https://linkedin.com/in/adewalesamsonadeagbo)
-        """
-    )
+**Top 5 Predictors:**
+1. 🎂 Age
+2. 💹 Capital Gain
+3. ⏰ Hours per Week
+4. 💍 Marital Status
+5. 🎓 Education & Occupation
+
+---
+
+**Author:** Adewale Adeagbo  
+[GitHub](https://github.com/cssadewale) ·
+[LinkedIn](https://linkedin.com/in/adewalesamsonadeagbo)
+
+---
+*YouThrive Data Science Capstone · 2025*
+    """)
+
 
 # ── Input Form ────────────────────────────────────────────────────────────
-st.subheader("📋 Enter Individual Details")
+st.subheader("📋 Step 1 — Enter Individual Details")
+st.caption("Fill in all the fields below, then click the Predict button at the bottom.")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    age = st.slider("Age", min_value=17, max_value=90, value=35, step=1)
-
-    education = st.selectbox("Education Level", [
-        "Preschool", "1st-4th", "5th-6th", "7th-8th", "9th",
-        "10th", "11th", "12th", "HS-grad", "Some-college",
-        "Assoc-acdm", "Assoc-voc", "Bachelors",
-        "Masters", "Prof-school", "Doctorate"
-    ], index=12)
-
-    occupation = st.selectbox("Occupation", [
-        "Adm-clerical", "Armed-Forces", "Craft-repair",
-        "Exec-managerial", "Farming-fishing", "Handlers-cleaners",
-        "Machine-op-inspct", "Other-service", "Priv-house-serv",
-        "Prof-specialty", "Protective-serv", "Sales",
-        "Tech-support", "Transport-moving"
-    ], index=3)
-
-    marital_status = st.selectbox("Marital Status", [
-        "Divorced", "Married-AF-spouse", "Married-civ-spouse",
-        "Married-spouse-absent", "Never-married", "Separated", "Widowed"
-    ], index=2)
-
-    hours_per_week = st.slider(
-        "Hours Worked per Week", min_value=1, max_value=99, value=40, step=1
+    st.markdown("**👤 Demographics**")
+    age = st.slider(
+        "Age", min_value=17, max_value=90, value=35, step=1,
+        help="Age of the individual (17–90)"
     )
-
-with col2:
-    workclass = st.selectbox("Work Class", [
-        "Federal-gov", "Local-gov", "Never-worked", "Private",
-        "Self-emp-inc", "Self-emp-not-inc", "State-gov", "Without-pay"
-    ], index=3)
-
-    relationship = st.selectbox("Relationship Role", [
-        "Husband", "Not-in-family", "Other-relative",
-        "Own-child", "Unmarried", "Wife"
-    ], index=0)
-
     sex = st.radio("Sex", ["Male", "Female"], index=0, horizontal=True)
-
     race = st.selectbox("Race", [
-        "Amer-Indian-Eskimo", "Asian-Pac-Islander",
-        "Black", "Other", "White"
-    ], index=4)
-
+        "White", "Black", "Asian-Pac-Islander", "Amer-Indian-Eskimo", "Other"
+    ])
     native_country = st.selectbox("Native Country", [
         "United-States", "Mexico", "Philippines", "Germany", "Canada",
         "Puerto-Rico", "El-Salvador", "India", "Cuba", "England",
@@ -219,29 +239,69 @@ with col2:
         "Taiwan", "Haiti", "Iran", "Portugal", "Nicaragua",
         "Peru", "France", "Greece", "Ecuador", "Ireland",
         "Hong", "Cambodia", "Thailand", "Trinadad&Tobago",
-        "Yugoslavia", "Outlying-US(Guam-USVI-etc)", "Hungary",
-        "Honduras", "Scotland", "Laos", "Bangladesh"
-    ], index=0)
+        "Yugoslavia", "Outlying-US(Guam-USVI-etc)",
+        "Hungary", "Honduras", "Scotland", "Laos"
+    ])
+    marital_status = st.selectbox("Marital Status", [
+        "Married-civ-spouse", "Never-married", "Divorced",
+        "Separated", "Widowed", "Married-spouse-absent", "Married-AF-spouse"
+    ])
+    relationship = st.selectbox("Relationship Role", [
+        "Husband", "Not-in-family", "Wife",
+        "Own-child", "Unmarried", "Other-relative"
+    ])
 
-# Capital gain and loss on full width
-st.markdown("---")
-st.markdown("**Investment Income (enter 0 if none)**")
-cap_col1, cap_col2 = st.columns(2)
-with cap_col1:
+with col2:
+    st.markdown("**💼 Employment**")
+    workclass = st.selectbox("Work Class", [
+        "Private", "Self-emp-not-inc", "Self-emp-inc",
+        "Federal-gov", "Local-gov", "State-gov",
+        "Without-pay", "Never-worked"
+    ])
+    occupation = st.selectbox("Occupation", [
+        "Prof-specialty", "Exec-managerial", "Craft-repair",
+        "Adm-clerical", "Sales", "Other-service",
+        "Machine-op-inspct", "Transport-moving", "Handlers-cleaners",
+        "Farming-fishing", "Tech-support", "Protective-serv",
+        "Priv-house-serv", "Armed-Forces"
+    ])
+    education = st.selectbox("Education Level", [
+        "Bachelors", "Some-college", "HS-grad", "Masters",
+        "Assoc-voc", "Assoc-acdm", "Prof-school", "Doctorate",
+        "11th", "10th", "9th", "12th",
+        "7th-8th", "5th-6th", "1st-4th", "Preschool"
+    ])
+    hours_per_week = st.slider(
+        "Hours Worked per Week", min_value=1, max_value=99, value=40, step=1,
+        help="Typical number of hours worked per week"
+    )
+
+    st.markdown("**💹 Investment Income**")
+    st.caption("Enter 0 if none.")
     capital_gain = st.number_input(
-        "Capital Gain ($)", min_value=0, max_value=99999, value=0, step=100
+        "Capital Gain ($)",
+        min_value=0, max_value=99999, value=0, step=100,
+        help="Income from investment gains (0 for most people)"
     )
-with cap_col2:
     capital_loss = st.number_input(
-        "Capital Loss ($)", min_value=0, max_value=4356, value=0, step=100
+        "Capital Loss ($)",
+        min_value=0, max_value=4356, value=0, step=100,
+        help="Losses from investments (0 for most people)"
     )
+
 
 # ── Predict Button ────────────────────────────────────────────────────────
 st.markdown("---")
-predict_clicked = st.button("🔮 Predict Income Level", use_container_width=True)
+st.subheader("🔮 Step 2 — Get Prediction")
+predict_clicked = st.button(
+    "Predict Income Level",
+    use_container_width=True,
+    type="primary"
+)
 
 if predict_clicked:
-    # Assemble raw input
+
+    # Assemble raw input dictionary
     raw_input = {
         "age":            age,
         "workclass":      workclass,
@@ -257,60 +317,71 @@ if predict_clicked:
         "native_country": native_country,
     }
 
-    # Preprocess
-    X_input = preprocess_input(raw_input)
-
-    # Predict
+    # Preprocess and predict
+    X_input    = preprocess_input(raw_input)
     prediction = model.predict(X_input)[0]
-    probability = model.predict_proba(X_input)[0][1]  # P(>50K)
+    prob_high  = model.predict_proba(X_input)[0][1]   # P(income > 50K)
+    prob_low   = model.predict_proba(X_input)[0][0]   # P(income <= 50K)
 
-    # ── Display Result ────────────────────────────────────────────────────
+    # ── Result Display ────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("🎯 Prediction Result")
 
     if prediction == 1:
-        st.success(f"### ✅ Predicted Income: **> $50,000 / year**")
+        st.success("### ✅  Predicted Income:  **> $50,000 / year**")
+    else:
+        st.warning("### 📉  Predicted Income:  **≤ $50,000 / year**")
+
+    # Two probability metrics side by side
+    m1, m2 = st.columns(2)
+    m1.metric(label="Probability > $50K",  value=f"{prob_high:.1%}")
+    m2.metric(label="Probability ≤ $50K", value=f"{prob_low:.1%}")
+
+    # Visual confidence bar
+    st.markdown("**Model confidence — probability of earning > $50K:**")
+    st.progress(float(prob_high))
+
+    # Plain-English interpretation
+    if prediction == 1:
         st.markdown(
-            f"The model estimates a **{probability:.1%} probability** "
-            f"that this individual earns above \\$50,000 per year."
+            f"The model is **{prob_high:.1%} confident** this individual "
+            f"earns **above \\$50,000** per year."
         )
     else:
-        st.warning(f"### 📉 Predicted Income: **≤ $50,000 / year**")
         st.markdown(
-            f"The model estimates a **{probability:.1%} probability** "
-            f"that this individual earns above \\$50,000 per year."
+            f"The model is **{prob_low:.1%} confident** this individual "
+            f"earns **\\$50,000 or below** per year."
         )
 
-    # Probability progress bar
-    st.markdown("**Probability of earning > $50K:**")
-    st.progress(float(probability))
-    st.caption(f"{probability:.1%} confidence")
-
-    # ── Key Input Summary ─────────────────────────────────────────────────
-    with st.expander("📄 View Input Summary"):
+    # Collapsible input summary
+    with st.expander("📄 View Full Input Summary"):
         summary = pd.DataFrame({
             "Feature": [
-                "Age", "Education", "Occupation", "Marital Status",
-                "Work Class", "Hours/Week", "Sex", "Race",
-                "Native Country", "Capital Gain", "Capital Loss"
+                "Age", "Sex", "Race", "Native Country",
+                "Marital Status", "Relationship Role",
+                "Work Class", "Occupation", "Education",
+                "Hours / Week", "Capital Gain", "Capital Loss"
             ],
-            "Value": [
-                age, education, occupation, marital_status,
-                workclass, hours_per_week, sex, race,
-                native_country, f"${capital_gain:,}", f"${capital_loss:,}"
+            "Value Entered": [
+                age, sex, race, native_country,
+                marital_status, relationship,
+                workclass, occupation, education,
+                f"{hours_per_week} hrs",
+                f"${capital_gain:,}",
+                f"${capital_loss:,}"
             ]
         })
         st.dataframe(summary, hide_index=True, use_container_width=True)
 
-    # ── Disclaimer ────────────────────────────────────────────────────────
+    # Disclaimer
     st.markdown("---")
     st.caption(
-        "⚠️  **Disclaimer:** This prediction is based on a model trained on 1994 U.S. Census data. "
-        "It is intended for educational and portfolio demonstration purposes only. "
-        "Real-world income is influenced by many factors not captured in this dataset. "
-        "This tool should not be used to make decisions affecting real individuals without "
-        "a formal fairness audit."
+        "⚠️ **Disclaimer:** This prediction is based on a model trained on 1994 "
+        "U.S. Census data and is intended for **educational and portfolio "
+        "demonstration** purposes only. It must not be used to make decisions "
+        "affecting real individuals without a formal fairness audit."
     )
+
 
 # ── Footer ────────────────────────────────────────────────────────────────
 st.markdown("---")
@@ -318,5 +389,5 @@ st.caption(
     "Built by **Adewale Adeagbo** · "
     "[GitHub](https://github.com/cssadewale) · "
     "[LinkedIn](https://linkedin.com/in/adewalesamsonadeagbo) · "
-    "YouThrive Data Science Capstone 2025"
+    "YouThrive Data Science Capstone · 2025"
 )
