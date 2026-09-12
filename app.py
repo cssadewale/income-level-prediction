@@ -15,6 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pathlib import Path
 
 # ── Page Configuration ────────────────────────────────────────────────────
 st.set_page_config(
@@ -28,45 +29,50 @@ st.set_page_config(
 MODEL_FILE_ID  = "1Gu0twEPwLE3qqYFnJ8JfU2YQFi4k1l9B"
 SCALER_FILE_ID = "1__bNEQfDKE2gLbZxs6xfkWFF0gs-Ddhe"
 
-MODEL_PATH  = "income_prediction_rf_model.joblib"
-SCALER_PATH = "income_prediction_scaler.joblib"
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH  = BASE_DIR / "income_prediction_rf_model.joblib"
+SCALER_PATH = BASE_DIR / "income_prediction_scaler.joblib"
 
 
 # ── Download and Load Model Files ─────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_artifacts():
-    """
-    Download model and scaler from Google Drive if not already present,
-    then load and return them.
-    @st.cache_resource ensures this runs only once per session.
-    """
-    if not os.path.exists(MODEL_PATH):
-        with st.spinner("Downloading model file... (first load only, ~15 seconds)"):
-            gdown.download(
-                f"https://drive.google.com/uc?id={MODEL_FILE_ID}",
-                MODEL_PATH,
-                quiet=False
+    """Download, validate and load the model and scaler exactly once."""
+    def ensure_download(path, file_id, label):
+        if path.exists():
+            return
+        with st.spinner(f"Downloading {label}... (first load only)"):
+            downloaded = gdown.download(
+                f"https://drive.google.com/uc?id={file_id}",
+                str(path),
+                quiet=False,
+            )
+        if not downloaded or not path.exists():
+            raise RuntimeError(
+                f"{label} download failed. Confirm the Google Drive file is "
+                "shared as Anyone with the link."
             )
 
-    if not os.path.exists(SCALER_PATH):
-        with st.spinner("Downloading scaler file..."):
-            gdown.download(
-                f"https://drive.google.com/uc?id={SCALER_FILE_ID}",
-                SCALER_PATH,
-                quiet=False
+    try:
+        ensure_download(MODEL_PATH, MODEL_FILE_ID, "model file")
+        ensure_download(SCALER_PATH, SCALER_FILE_ID, "scaler file")
+        model = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+        if not hasattr(model, "predict_proba") or not hasattr(model, "n_features_in_"):
+            raise ValueError("Downloaded model is not a compatible classifier artifact")
+        if not hasattr(scaler, "transform") or not hasattr(scaler, "n_features_in_"):
+            raise ValueError("Downloaded scaler is not a compatible scaler artifact")
+        if scaler.n_features_in_ != 4:
+            raise ValueError(
+                f"Expected a four-column scaler, found {scaler.n_features_in_} columns"
             )
-
-    if not os.path.exists(MODEL_PATH) or not os.path.exists(SCALER_PATH):
+        return model, scaler
+    except Exception as exc:
         st.error(
-            "❌ Model files could not be downloaded from Google Drive. "
-            "Please ensure both files are shared as 'Anyone with the link' "
-            "in Google Drive, then reload this page."
+            "❌ Income model artifacts could not be loaded. "
+            f"{type(exc).__name__}: {exc}"
         )
         st.stop()
-
-    model  = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return model, scaler
 
 
 model, scaler = load_artifacts()
@@ -119,6 +125,14 @@ TRAINING_COLUMNS = [
 ]
 
 NUMERICAL_COLS = ['age', 'capital_gain', 'capital_loss', 'hours_per_week']
+
+if model.n_features_in_ != len(TRAINING_COLUMNS):
+    st.error(
+        "❌ Model schema mismatch: the downloaded model expects "
+        f"{model.n_features_in_} features, while the app builds "
+        f"{len(TRAINING_COLUMNS)}."
+    )
+    st.stop()
 
 
 # ── Preprocessing Function ────────────────────────────────────────────────
